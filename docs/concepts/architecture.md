@@ -167,6 +167,68 @@ The NautilusTrader codebase is actually both a framework for composing trading
 
 ![Architecture](https://github.com/nautechsystems/nautilus_trader/blob/develop/assets/architecture-overview.png?raw=true "architecture")
 
+The following diagram shows all major modules and their relationships within a running Nautilus node:
+
+```mermaid
+flowchart TB
+    subgraph external["External World"]
+        venues["Venues / Exchanges\n(Binance, IB, Betfair, …)"]
+        data_sources["Market Data Sources\n(Databento, Tardis, …)"]
+    end
+
+    subgraph adapters_layer["Adapters Layer"]
+        exec_client["ExecutionClient\n(venue adapter)"]
+        data_client["DataClient\n(venue / data adapter)"]
+    end
+
+    subgraph kernel["NautilusKernel (single-threaded core)"]
+        direction TB
+
+        subgraph engines["Engines"]
+            data_eng["DataEngine"]
+            risk_eng["RiskEngine"]
+            exec_eng["ExecutionEngine"]
+            portfolio["Portfolio"]
+        end
+
+        msgbus["MessageBus\n(Pub/Sub · Req/Rep · Commands/Events)"]
+        cache["Cache\n(instruments · orders · positions · accounts)"]
+
+        subgraph user_components["User Components"]
+            strategy["Strategy / Actor"]
+        end
+    end
+
+    subgraph persistence_layer["Persistence (optional)"]
+        catalog["ParquetDataCatalog"]
+        redis["Redis state store"]
+    end
+
+    %% External → Adapters
+    venues      <-->|"REST / WebSocket"| exec_client
+    data_sources -->|"REST / WebSocket"| data_client
+
+    %% Adapters → Engines
+    data_client -->|"normalized data"| data_eng
+    exec_client <-->|"order events / reports"| exec_eng
+
+    %% Engines ↔ MessageBus
+    data_eng  <-->|"data subscriptions / events"| msgbus
+    risk_eng  <-->|"commands / responses"| msgbus
+    exec_eng  <-->|"commands / events"| msgbus
+    portfolio <-->|"account / position events"| msgbus
+
+    %% User components ↔ MessageBus
+    strategy <-->|"subscribe / publish / commands"| msgbus
+
+    %% MessageBus ↔ Cache
+    msgbus <-->|"read / write state"| cache
+
+    %% Persistence
+    cache       -.->|"optional snapshot"| redis
+    data_eng    -.->|"stream to catalog"| catalog
+```
+
 ### Core components
 
 Several core components work together to form the trading system:
@@ -258,6 +320,22 @@ Understanding how data and execution flow through the system helps when working 
 4. **Event publishing**: Data events are published to the `MessageBus`.
 5. **Consumer delivery**: Subscribed components (Actors, Strategies) receive relevant data events.
 
+```mermaid
+sequenceDiagram
+    participant Venue as Venue / Data Source
+    participant DC as DataClient
+    participant DE as DataEngine
+    participant Cache
+    participant MB as MessageBus
+    participant S as Strategy / Actor
+
+    Venue->>DC: Raw market data (WebSocket / REST)
+    DC->>DE: Normalized data (QuoteTick, TradeTick, Bar, …)
+    DE->>Cache: Store latest data
+    DE->>MB: Publish data event
+    MB->>S: on_quote_tick() / on_bar() / …
+```
+
 #### Execution flow pattern
 
 1. **Command generation**: Strategies create trading commands.
@@ -267,6 +345,31 @@ Understanding how data and execution flow through the system helps when working 
 5. **External submission**: The `ExecutionClient` submits orders to external trading venues.
 6. **Event flow back**: Order events (fills, cancellations) flow back through the system.
 7. **State updates**: Portfolio and position states update based on execution events.
+
+```mermaid
+sequenceDiagram
+    participant S as Strategy
+    participant MB as MessageBus
+    participant RE as RiskEngine
+    participant EE as ExecutionEngine
+    participant EC as ExecutionClient
+    participant Venue
+    participant Portfolio
+    participant Cache
+
+    S->>MB: SubmitOrder command
+    MB->>RE: validate command
+    RE-->>MB: OrderDenied (if rejected)
+    RE->>EE: forward validated command
+    EE->>EC: route to venue adapter
+    EC->>Venue: place order (REST / WebSocket)
+    Venue-->>EC: OrderAccepted / OrderFilled event
+    EC->>EE: OrderFilled report
+    EE->>MB: publish OrderFilled event
+    MB->>S: on_order_filled()
+    MB->>Portfolio: update positions / account
+    MB->>Cache: persist updated state
+```
 
 #### Component state management
 
@@ -450,6 +553,82 @@ ultimately deliver events to the single-threaded core.
 The codebase organizes into layers of abstraction, grouped into logical subpackages
 of cohesive concepts. You can navigate to the documentation for each subpackage
 from the left nav menu.
+
+The diagram below shows how the Python/Cython subpackages are layered. Arrows point
+from higher-level modules toward their dependencies:
+
+```mermaid
+flowchart BT
+    subgraph Integrations["Integrations (built on Runtime)"]
+        adapters_mod["adapters\n(18+ venue integrations)"]
+    end
+
+    subgraph Runtime["Runtime (environment-specific)"]
+        backtest["backtest\nBacktestNode / engine"]
+        live["live\nTradingNode / engine"]
+    end
+
+    subgraph System["System"]
+        system["system\nNautilusKernel"]
+    end
+
+    subgraph Engines["Engines"]
+        data_mod["data\nDataEngine"]
+        exec_mod["execution\nExecutionEngine"]
+        risk_mod["risk\nRiskEngine"]
+        portfolio_mod["portfolio\nPortfolio"]
+    end
+
+    subgraph Components["Components"]
+        accounting["accounting"]
+        analysis["analysis"]
+        cache_mod["cache"]
+        indicators["indicators\n(50+ indicators)"]
+        persistence["persistence\n(Parquet catalog)"]
+        trading_mod["trading\nStrategy base"]
+    end
+
+    subgraph CoreLow["Core / Low-level"]
+        core_mod["core"]
+        common_mod["common"]
+        model_mod["model\n(domain types)"]
+        network_mod["network"]
+        serialization_mod["serialization"]
+    end
+
+    %% Integrations → Runtime
+    adapters_mod --> live
+    adapters_mod --> network_mod
+
+    %% Runtime → System
+    backtest --> system
+    live     --> system
+
+    %% System → Engines + Components
+    system --> data_mod
+    system --> exec_mod
+    system --> risk_mod
+    system --> portfolio_mod
+    system --> trading_mod
+    system --> cache_mod
+
+    %% Engines → Core
+    data_mod      --> common_mod
+    exec_mod      --> common_mod
+    risk_mod      --> portfolio_mod
+    portfolio_mod --> common_mod
+
+    %% Components → Core
+    trading_mod  --> common_mod
+    persistence  --> serialization_mod
+    network_mod  --> common_mod
+
+    %% Core → primitives
+    common_mod       --> core_mod
+    common_mod       --> model_mod
+    model_mod        --> core_mod
+    serialization_mod --> model_mod
+```
 
 ### Core / low-level
 
