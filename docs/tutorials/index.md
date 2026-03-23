@@ -13,3 +13,9 @@ Each tutorial is a Jupytext percent-format Python file in the docs [tutorials di
 - **Nightly**: These docs are built from the HEAD of the `nightly` branch and work with bleeding-edge and experimental features. See <https://nautilustrader.io/docs/nightly/tutorials/>.
 
 :::
+
+## Beginner guides
+
+| Tutorial | Description |
+|----------|-------------|
+| [Custom Historical Data](custom_historical_data) | **Start here if you are new.** Plain-English explanation of NautilusTrader plus step-by-step recipes for loading OHLCV bars, quote ticks, and trade ticks from a pandas DataFrame or CSV file into a backtest. |
